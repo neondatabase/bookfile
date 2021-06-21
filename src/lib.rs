@@ -15,18 +15,20 @@
 //! but no chapters will be read until requested.
 
 use std::io;
+use thiserror::Error;
 
 mod book;
 #[doc(inline)]
 pub use book::{BookWriter, ChapterWriter};
 
-// An error enum
-// FIXME: derive Error with thiserror
-// FIXME: add docs
-#[derive(Debug)]
+/// Book error type
+#[derive(Debug, Error)]
 pub enum BookError {
-    Io,
+    #[error("IO Error")]
+    Io(Option<io::Error>),
+    #[error("Premature EOF")]
     Eof,
+    #[error("Serialize/Deserialize Error")]
     Serializer,
 }
 
@@ -35,7 +37,7 @@ impl From<serde_cbor::Error> for BookError {
         use serde_cbor::error::Category;
 
         match e.classify() {
-            Category::Io => BookError::Io,
+            Category::Io => BookError::Io(None),
             Category::Syntax => BookError::Serializer,
             Category::Data => BookError::Serializer,
             Category::Eof => BookError::Eof,
@@ -44,8 +46,8 @@ impl From<serde_cbor::Error> for BookError {
 }
 
 impl From<io::Error> for BookError {
-    fn from(_: io::Error) -> Self {
-        BookError::Io
+    fn from(e: io::Error) -> Self {
+        BookError::Io(Some(e))
     }
 }
 

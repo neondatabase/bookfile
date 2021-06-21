@@ -10,3 +10,4 @@ versioned = { path="../versioned/versioned" }
 serde = { version = "1.0", features = ["derive"] }
 serde_cbor = "0.11"
 byteorder = "1.4"
+thiserror = "1.0"
