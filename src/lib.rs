@@ -10,7 +10,7 @@
 //! The `Book` type represents a read-only Bookfile. It can read individual chapters
 //! by seeking to their offset, and reads will end where the chapter ends.
 //!
-//! A chapter's offset, length, and id number are all kept in a Table-of-contents
+//! A chapter's offset, length, and id number are all kept in a *Table of Contents*
 //! stored at the end of the file. The TOC will be read when a Book is opened,
 //! but no chapters will be read until requested.
 
@@ -51,4 +51,5 @@ impl From<io::Error> for BookError {
     }
 }
 
+// A Result type for things that may return [`BookError`].
 pub type Result<T> = std::result::Result<T, BookError>;
