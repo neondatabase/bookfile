@@ -19,7 +19,7 @@ use thiserror::Error;
 
 mod book;
 #[doc(inline)]
-pub use book::{BookWriter, ChapterWriter};
+pub use book::{Book, BookWriter, ChapterWriter};
 
 /// Book error type
 #[derive(Debug, Error)]
@@ -30,6 +30,8 @@ pub enum BookError {
     Eof,
     #[error("Serialize/Deserialize Error")]
     Serializer,
+    #[error("Chapter not found")]
+    NoChapter,
 }
 
 impl From<serde_cbor::Error> for BookError {
