@@ -14,6 +14,10 @@
 //! stored at the end of the file. The TOC will be read when a Book is opened,
 //! but no chapters will be read until requested.
 
+#![warn(missing_docs)]
+#![forbid(unsafe_code)]
+#![warn(clippy::cast_possible_truncation)]
+
 use std::io;
 use thiserror::Error;
 
@@ -26,12 +30,16 @@ mod read;
 /// Book error type
 #[derive(Debug, Error)]
 pub enum BookError {
+    /// A `std::io::Error` occurred while reading or writing data.
     #[error("IO Error")]
     Io(Option<io::Error>),
+    /// An EOF happened while attempting to read data.
     #[error("Premature EOF")]
     Eof,
+    /// An error occurred while serializing or deserializing data.
     #[error("Serialize/Deserialize Error")]
     Serializer,
+    /// The requested chapter was not found.
     #[error("Chapter not found")]
     NoChapter,
 }
@@ -55,5 +63,5 @@ impl From<io::Error> for BookError {
     }
 }
 
-// A Result type for things that may return [`BookError`].
+/// A Result type for things that may return [`BookError`].
 pub type Result<T> = std::result::Result<T, BookError>;
