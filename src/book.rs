@@ -1,8 +1,8 @@
+use crate::read::BoundedReader;
 use crate::{BookError, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
-use serde_cbor::{from_slice, to_vec};
-use std::convert::TryInto;
+use serde_cbor::{from_reader, to_vec};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::thread::panicking;
@@ -58,19 +58,11 @@ impl FileSpan {
     ///
     /// If `length` is 0, `None` will be returned.
     pub fn from_offset_length(offset: usize, length: usize) -> Option<Self> {
-        // usize always fits in u64, on every target arch we care about.
-        // So this error path should be optimized away.
-        let offset = offset.try_into().unwrap();
-        let length: u64 = length.try_into().unwrap();
+        let offset = offset as u64;
+        let length = length as u64;
         // Try to create a NonZeroU64 length; if that returns Some(l)
         // then return Some(FileSpan{..}) else None.
         NonZeroU64::new(length).map(|length| FileSpan { offset, length })
-    }
-
-    #[track_caller]
-    fn length_usize(&self) -> usize {
-        let length: u64 = self.length.into();
-        length.try_into().unwrap()
     }
 }
 
@@ -260,7 +252,7 @@ impl<W: Write> BookWriter<W> {
 
         // Manually serialize the TOC length, so that it has a fixed size and
         // a fixed offset (relative to the end of the file).
-        let toc_length: u64 = toc_buf.len().try_into().unwrap();
+        let toc_length = toc_buf.len() as u64;
         toc_buf.write_u64::<BigEndian>(toc_length).unwrap();
 
         // Write the TOC.
@@ -315,23 +307,16 @@ where
         }
 
         // Read the TOC length. For v1 it is the last 8 bytes of the file.
-        reader.seek(SeekFrom::End(-8))?;
+        let toc_end = reader.seek(SeekFrom::End(-8))?;
         let toc_len = reader.read_u64::<BigEndian>()?;
         if toc_len > MAX_TOC_SIZE {
             return Err(BookError::Serializer);
         }
-        let toc_len: i64 = toc_len.try_into().map_err(|_| BookError::Serializer)?;
-        // Because we already checked MAX_TOC_SIZE this math cannot overflow.
-        reader.seek(SeekFrom::End(-8 - toc_len))?;
 
         // Deserialize the TOC.
-        // FIXME: from_reader seems like a better approach, but it seems
-        // to expect that the data ends at EOF, otherwise it throws
-        // "trailing data" errors, which seems really odd.
-        // FIXME: build a Read adapter than is bounded by a certain span?
-        let mut toc_buf = vec![0u8; toc_len.try_into().unwrap()];
-        reader.read_exact(&mut toc_buf)?;
-        let toc_entries: Vec<TocEntry> = from_slice(&toc_buf)?;
+        let toc_offset = toc_end - toc_len;
+        let toc_reader = BoundedReader::new(&mut reader, toc_offset, toc_len);
+        let toc_entries: Vec<TocEntry> = from_reader(toc_reader)?;
 
         Ok(Book {
             reader,
@@ -354,21 +339,34 @@ where
     }
 
     /// Read a chapter by index.
-    pub fn read_chapter(&mut self, index: ChapterIndex) -> Result<Vec<u8>> {
+    pub fn chapter_reader(&mut self, index: ChapterIndex) -> Result<BoundedReader<R>> {
         let toc_entry = self.toc_entries.get(index.0).ok_or(BookError::NoChapter)?;
         match &toc_entry.span {
             None => {
                 // If the span is empty, no IO is necessary; just return
                 // an empty Vec.
-                Ok(vec![])
+                Ok(BoundedReader::empty(&mut self.reader))
             }
             Some(span) => {
                 self.reader.seek(SeekFrom::Start(span.offset))?;
-                let mut buf = vec![0u8; span.length_usize()];
-                self.reader.read_exact(&mut buf)?;
-                Ok(buf)
+                Ok(BoundedReader::new(
+                    &mut self.reader,
+                    span.offset,
+                    span.length.into(),
+                ))
             }
         }
+    }
+
+    /// Read all bytes in a chapter.
+    ///
+    /// This is the same thing as calling [`chapter_reader`] followed by
+    /// `read_to_end`.
+    pub fn read_chapter(&mut self, index: ChapterIndex) -> Result<Box<[u8]>> {
+        let mut buf = vec![];
+        let mut reader = self.chapter_reader(index)?;
+        reader.read_to_end(&mut buf)?;
+        Ok(buf.into_boxed_slice())
     }
 }
 
@@ -416,6 +414,6 @@ mod tests {
 
         let n = book.find_chapter(22).unwrap();
         let ch2 = book.read_chapter(n).unwrap();
-        assert_eq!(ch2, b"This is chapter 22");
+        assert_eq!(ch2.as_ref(), b"This is chapter 22");
     }
 }

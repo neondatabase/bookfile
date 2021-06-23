@@ -21,6 +21,8 @@ mod book;
 #[doc(inline)]
 pub use book::{Book, BookWriter, ChapterWriter};
 
+mod read;
+
 /// Book error type
 #[derive(Debug, Error)]
 pub enum BookError {
