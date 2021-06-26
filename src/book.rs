@@ -1,12 +1,12 @@
 use crate::read::BoundedReader;
 use crate::{BookError, Result};
+use aversion::Versioned;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use serde_cbor::{from_reader, to_vec};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::thread::panicking;
-use versioned::Versioned;
 
 /// The version of BookWriter being used
 const BOOK_V1_MAGIC: u32 = 0xFF33_0001;
@@ -16,10 +16,6 @@ const HEADER_SIZE: usize = 4096;
 
 /// The maximum TOC size we will attempt to read
 const MAX_TOC_SIZE: u64 = 0x400_0000; // 64MB
-
-// Base-type placeholder for the Versioned trait
-#[doc(hidden)]
-pub enum FileHeaderBase {}
 
 /// The `Book` file header struct.
 ///
@@ -33,10 +29,6 @@ pub struct FileHeaderV1 {
 
 /// A type alias; this will always point to the latest version `FileHeader`.
 pub type FileHeader = FileHeaderV1;
-
-// Base-type placeholder for the Versioned trait
-#[doc(hidden)]
-pub enum FileSpanBase {}
 
 /// A `FileSpan` stores the byte offset and length of some range of a file.
 ///
@@ -65,10 +57,6 @@ impl FileSpan {
         NonZeroU64::new(length).map(|length| FileSpan { offset, length })
     }
 }
-
-// Base-type placeholder for the Versioned trait
-#[doc(hidden)]
-pub enum TocEntryBase {}
 
 /// A Table-of-contents entry.
 ///
