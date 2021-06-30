@@ -1,6 +1,9 @@
 use std::convert::TryInto;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 
+#[cfg(target_family = "unix")]
+use std::os::unix::fs::FileExt;
+
 /// A helper function to convert `u64` to `usize`.
 ///
 /// This will panic if the value doesn't fit in a `usize`.
@@ -155,10 +158,38 @@ where
     }
 }
 
+// This is a half implementation of the FileExt trait, but since that trait
+// is os-specific, and we don't support `write_at`, supplying a function with
+// the same name seems like an acceptable compromise.
+#[cfg(target_family = "unix")]
+impl<R> BoundedReader<'_, R>
+where
+    R: FileExt,
+{
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        let bound_end = self.start.checked_add(self.length).unwrap();
+        if offset > bound_end {
+            // Trying to read past the end of the bounded region.
+            return Ok(0);
+        }
+        let requested_end = self.start + offset + buf.len() as u64;
+        let end_reduction = requested_end.saturating_sub(bound_end);
+        // Will always succeed, since end_reduction can never be larger than buf.len()
+        let end_reduction: usize = end_reduction.try_into().unwrap();
+        let capped_len: usize = buf.len().checked_sub(end_reduction).unwrap();
+        let capped_buf = &mut buf[..capped_len];
+
+        // Will always succeed, since we already checked that the offset
+        // fits within the bounded range.
+        let adjusted_offset = self.start.checked_add(offset).unwrap();
+        self.reader.read_at(capped_buf, adjusted_offset)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufReader, Cursor, ErrorKind};
+    use std::io::{BufReader, Cursor, ErrorKind, Write};
 
     #[test]
     fn bounds_test() {
@@ -218,5 +249,35 @@ mod tests {
         reader.consume(3);
         let buffered = reader.fill_buf().unwrap();
         assert_eq!(buffered, [8, 9]);
+    }
+
+    #[test]
+    fn read_at() {
+        let mut buf = Vec::<u8>::new();
+        for ii in 0..128 {
+            buf.push(ii);
+        }
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&buf).unwrap();
+
+        let reader = BoundedReader::new(&mut file, 5, 5);
+
+        // A read entirely contained within the bounded range.
+        let mut read_buf = [0u8; 3];
+        let bytes_read = reader.read_at(&mut read_buf, 1).unwrap();
+        assert_eq!(bytes_read, 3);
+        assert_eq!(read_buf, [6, 7, 8]);
+
+        // Try read past the end.
+        let mut read_buf = [0u8; 8];
+        let bytes_read = reader.read_at(&mut read_buf, 0).unwrap();
+        assert_eq!(bytes_read, 5);
+        assert_eq!(read_buf, [5, 6, 7, 8, 9, 0, 0, 0]);
+
+        // Try read, right at the end.
+        let mut read_buf = [0u8; 2];
+        let bytes_read = reader.read_at(&mut read_buf, 5).unwrap();
+        assert_eq!(bytes_read, 0);
+        assert_eq!(read_buf, [0, 0]);
     }
 }
