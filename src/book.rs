@@ -290,6 +290,7 @@ impl<W: Write> BookWriter<W> {
 }
 
 /// A chapter index.
+#[derive(Clone, Copy, Debug)]
 pub struct ChapterIndex(pub usize);
 
 /// An interface for reading a Bookfile.
