@@ -384,6 +384,8 @@ where
     ///
     /// This is the same thing as calling [`chapter_reader`] followed by
     /// `read_to_end`.
+    ///
+    /// [`chapter_reader`]: Self::chapter_reader
     pub fn read_chapter(&mut self, index: ChapterIndex) -> Result<Box<[u8]>> {
         let mut buf = vec![];
         let mut reader = self.chapter_reader(index)?;
