@@ -302,6 +302,16 @@ pub struct Book<R> {
     toc: Toc,
 }
 
+impl<R> Book<R> {
+    /// Return the file's magic number
+    ///
+    /// Each BookWriter specifies a magic number, used to identify this file format.
+    /// This method returns the value found in the file.
+    pub fn magic(&self) -> u32 {
+        self.header.user_magic
+    }
+}
+
 impl<R> Book<R>
 where
     R: Read + Seek,
