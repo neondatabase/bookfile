@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::cast_possible_truncation)]
 
+use aversion::util::cbor::CborDataError;
 use std::io;
 use thiserror::Error;
 
@@ -44,15 +45,12 @@ pub enum BookError {
     NoChapter,
 }
 
-impl From<serde_cbor::Error> for BookError {
-    fn from(e: serde_cbor::Error) -> Self {
-        use serde_cbor::error::Category;
-
-        match e.classify() {
-            Category::Io => BookError::Io(None),
-            Category::Syntax => BookError::Serializer,
-            Category::Data => BookError::Serializer,
-            Category::Eof => BookError::Eof,
+impl From<CborDataError> for BookError {
+    fn from(e: CborDataError) -> Self {
+        match e {
+            CborDataError::Io(opt) => BookError::Io(opt),
+            CborDataError::Serializer => BookError::Serializer,
+            CborDataError::Eof => BookError::Eof,
         }
     }
 }

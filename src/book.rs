@@ -1,10 +1,11 @@
 use crate::read::BoundedReader;
 use crate::{BookError, Result};
-use aversion::Versioned;
+use aversion::group::{DataSink, DataSourceExt};
+use aversion::util::cbor::CborData;
+use aversion::{assign_message_ids, UpgradeLatest, Versioned};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
-use serde_cbor::{from_reader, to_vec};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::thread::panicking;
 
@@ -21,7 +22,7 @@ const MAX_TOC_SIZE: u64 = 0x400_0000; // 64MB
 ///
 /// This is used to communicate that this file is in `Book`
 /// format, and what type of data it contains.
-#[derive(Debug, Versioned, Serialize, Deserialize)]
+#[derive(Debug, Versioned, UpgradeLatest, Serialize, Deserialize)]
 pub struct FileHeaderV1 {
     bookwriter_magic: u32,
     pub user_magic: u32,
@@ -36,16 +37,13 @@ pub type FileHeader = FileHeaderV1;
 /// can be confusing if code attempts to read a zero-sized span. Use
 /// `Option<FileSpan` to represent a zero-sized span.
 ///
-#[derive(Debug, Versioned, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FileSpanV1 {
     pub offset: u64,
     pub length: NonZeroU64,
 }
 
-/// A type alias; this will always point to the latest version `FileSpan`.
-pub type FileSpan = FileSpanV1;
-
-impl FileSpan {
+impl FileSpanV1 {
     /// Create a `FileSpan` from offset and length.
     ///
     /// If `length` is 0, `None` will be returned.
@@ -54,22 +52,53 @@ impl FileSpan {
         let length = length as u64;
         // Try to create a NonZeroU64 length; if that returns Some(l)
         // then return Some(FileSpan{..}) else None.
-        NonZeroU64::new(length).map(|length| FileSpan { offset, length })
+        NonZeroU64::new(length).map(|length| FileSpanV1 { offset, length })
     }
 }
+
+// A type alias, to make code a little easier to read.
+type FileSpan = FileSpanV1;
 
 /// A Table-of-contents entry.
 ///
 /// This contains an identifying number, and a file span that
 /// tells us what chunk of the file contains this chapter.
-#[derive(Debug, Versioned, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TocEntryV1 {
     pub id: u64,
-    pub span: Option<FileSpan>,
+    pub span: Option<FileSpanV1>,
 }
 
-/// A type alias; this will always point to the latest version `TocEntry`.
-pub type TocEntry = TocEntryV1;
+// A type alias, to make code a little easier to read.
+type TocEntry = TocEntryV1;
+
+/// A Table-of-contents.
+///
+/// This contains multiple `TocEntry` values, one for each chapter.
+#[derive(Debug, Default, Serialize, Deserialize, Versioned, UpgradeLatest)]
+pub struct TocV1(Vec<TocEntryV1>);
+
+// A type alias, used by the Versioned trait.
+type Toc = TocV1;
+
+impl Toc {
+    fn add(&mut self, entry: TocEntry) {
+        self.0.push(entry);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &TocEntry> {
+        self.0.iter()
+    }
+
+    fn get_chapter(&self, index: ChapterIndex) -> Result<&TocEntry> {
+        self.0.get(index.0).ok_or(BookError::NoChapter)
+    }
+}
+
+assign_message_ids! {
+    FileHeader: 1,
+    Toc: 2,
+}
 
 /// A tool for writing a `Chapter`.
 ///
@@ -89,7 +118,7 @@ pub type TocEntry = TocEntryV1;
 /// [`close()`]: Self::close
 pub struct ChapterWriter<'a, W> {
     writer: &'a mut W,
-    toc_entries: &'a mut Vec<TocEntry>,
+    toc: &'a mut Toc,
     id: u64,
     offset: usize,
     length: usize,
@@ -103,7 +132,7 @@ where
     fn new(book: &'a mut BookWriter<W>, id: u64, offset: usize) -> Self {
         ChapterWriter {
             writer: &mut book.writer,
-            toc_entries: &mut book.toc_entries,
+            toc: &mut book.toc,
             id,
             offset,
             length: 0,
@@ -123,7 +152,7 @@ where
             span: FileSpan::from_offset_length(self.offset, self.length),
         };
 
-        self.toc_entries.push(toc_entry);
+        self.toc.add(toc_entry);
 
         // Mark this Chapter as safe to drop.
         self.length = 0;
@@ -180,7 +209,7 @@ pub struct BookWriter<W: Write> {
     writer: W,
     current_offset: usize,
     header: FileHeader,
-    toc_entries: Vec<TocEntry>,
+    toc: Toc,
 }
 
 impl<W: Write> BookWriter<W> {
@@ -198,7 +227,7 @@ impl<W: Write> BookWriter<W> {
                 bookwriter_magic: BOOK_V1_MAGIC,
                 user_magic,
             },
-            toc_entries: vec![],
+            toc: Toc::default(),
         };
         this.write_header()?;
         Ok(this)
@@ -206,7 +235,11 @@ impl<W: Write> BookWriter<W> {
 
     fn write_header(&mut self) -> Result<()> {
         // Serialize the header into a buffer.
-        let mut header_buf = to_vec(&self.header)?;
+        let header_buf = Cursor::new(Vec::<u8>::new());
+        let mut header_writer = CborData::new(header_buf);
+        header_writer.write_message(&self.header)?;
+
+        let mut header_buf = header_writer.into_inner().into_inner();
         if header_buf.len() > HEADER_SIZE {
             panic!("serialized header exceeds maximum size");
         }
@@ -236,7 +269,10 @@ impl<W: Write> BookWriter<W> {
     /// It is normal to discard it, except in unit tests.
     pub fn close(mut self) -> Result<W> {
         // Serialize the TOC into a buffer.
-        let mut toc_buf = to_vec(&self.toc_entries)?;
+        let toc_buf = Cursor::new(Vec::<u8>::new());
+        let mut toc_writer = CborData::new(toc_buf);
+        toc_writer.write_message(&self.toc)?;
+        let mut toc_buf = toc_writer.into_inner().into_inner();
 
         // Manually serialize the TOC length, so that it has a fixed size and
         // a fixed offset (relative to the end of the file).
@@ -262,7 +298,7 @@ pub struct ChapterIndex(pub usize);
 pub struct Book<R> {
     reader: R,
     header: FileHeader,
-    toc_entries: Vec<TocEntry>,
+    toc: Toc,
 }
 
 impl<R> Book<R>
@@ -281,13 +317,10 @@ where
         let mut header_buf = [0u8; HEADER_SIZE];
         reader.seek(SeekFrom::Start(0))?;
         reader.read_exact(&mut header_buf)?;
-        let mut buf_reader = &header_buf[..];
-        let deser = serde_cbor::Deserializer::from_reader(&mut buf_reader);
-        // FIXME: this is a terrible hack, because serde_cbor always fails
-        // if there is trailing data. Maybe replace this with pre-header that
-        // contains magic numbers and header size?
-        // FIXME: get rid of .unwrap()
-        let header: FileHeader = deser.into_iter().next().unwrap()?;
+        let buf_reader = &header_buf[..];
+
+        let mut data_src = CborData::new(buf_reader);
+        let header: FileHeader = data_src.expect_message()?;
 
         // Verify magic numbers
         if header.bookwriter_magic != BOOK_V1_MAGIC {
@@ -304,12 +337,13 @@ where
         // Deserialize the TOC.
         let toc_offset = toc_end - toc_len;
         let toc_reader = BoundedReader::new(&mut reader, toc_offset, toc_len);
-        let toc_entries: Vec<TocEntry> = from_reader(toc_reader)?;
+        let mut data_src = CborData::new(toc_reader);
+        let toc: Toc = data_src.expect_message().unwrap();
 
         Ok(Book {
             reader,
             header,
-            toc_entries,
+            toc,
         })
     }
 
@@ -318,7 +352,7 @@ where
     /// For now, we assume chapter ids are unique. That's dumb,
     /// and will be fixed in a future version.
     pub fn find_chapter(&self, id: u64) -> Option<ChapterIndex> {
-        for (index, entry) in self.toc_entries.iter().enumerate() {
+        for (index, entry) in self.toc.iter().enumerate() {
             if entry.id == id {
                 return Some(ChapterIndex(index));
             }
@@ -328,7 +362,7 @@ where
 
     /// Read a chapter by index.
     pub fn chapter_reader(&mut self, index: ChapterIndex) -> Result<BoundedReader<R>> {
-        let toc_entry = self.toc_entries.get(index.0).ok_or(BookError::NoChapter)?;
+        let toc_entry = self.toc.get_chapter(index)?;
         match &toc_entry.span {
             None => {
                 // If the span is empty, no IO is necessary; just return
@@ -374,7 +408,7 @@ mod tests {
         }
 
         // This file contains only a header, an empty TOC, and a TOC-length.
-        assert_eq!(cursor.get_ref().len(), 4096 + 1 + 8);
+        assert_eq!(cursor.get_ref().len(), 4096 + 9 + 8);
 
         // If this succeeds then the header and TOC were parsed correctly.
         let _ = Book::new(cursor).unwrap();
