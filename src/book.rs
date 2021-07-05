@@ -349,7 +349,7 @@ where
         let toc_offset = toc_end - toc_len;
         let toc_reader = BoundedReader::new(&mut reader, toc_offset, toc_len);
         let mut data_src = CborData::new(toc_reader);
-        let toc: Toc = data_src.expect_message().unwrap();
+        let toc: Toc = data_src.expect_message()?;
 
         Ok(Book {
             reader,
@@ -425,6 +425,22 @@ mod tests {
 
         // If this succeeds then the header and TOC were parsed correctly.
         let _ = Book::new(cursor).unwrap();
+    }
+
+    #[test]
+    fn truncated_book() {
+        let magic = 0x1234;
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        {
+            let book = BookWriter::new(&mut cursor, magic).unwrap();
+            // We drop the BookWriter without calling close().
+        }
+
+        // This file contains only a header (yes, this is invalid).
+        assert_eq!(cursor.get_ref().len(), 4096);
+
+        // This should fail, because we are unable to parse the chapter index.
+        Book::new(cursor).unwrap_err();
     }
 
     #[test]
