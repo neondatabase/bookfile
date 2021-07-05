@@ -1,12 +1,17 @@
 [package]
 name = "bookfile"
 version = "0.1.0"
+description = "A container file format with chapters and an index"
+keywords = ["file", "format", "chapters"]
+categories = ["data-structures", "encoding"]
+repository = "https://github.com/ericseppanen/bookfile"
+readme = "README.md"
 authors = ["Eric Seppanen <eds@reric.net>"]
 edition = "2018"
 license = "Apache-2.0"
 
 [dependencies]
-aversion = { path="../aversion/aversion" }
+aversion = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 byteorder = "1.4"
 thiserror = "1.0"
