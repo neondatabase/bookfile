@@ -116,25 +116,22 @@ assign_message_ids! {
 /// See [`BookWriter`] for more information.
 ///
 /// [`close()`]: Self::close
-pub struct ChapterWriter<'a, W> {
-    writer: &'a mut W,
-    toc: &'a mut Toc,
-    parent_offset: &'a mut usize,
+pub struct ChapterWriter<W> {
+    book: Option<BookWriter<W>>,
     id: u64,
     offset: usize,
     length: usize,
 }
 
-impl<'a, W> ChapterWriter<'a, W>
+impl<W> ChapterWriter<W>
 where
     W: Write,
 {
     /// Create a new `ChapterWriter`.
-    fn new(book: &'a mut BookWriter<W>, id: u64, offset: usize) -> Self {
+    fn new(book: BookWriter<W>, id: u64) -> Self {
+        let offset = book.current_offset;
         ChapterWriter {
-            writer: &mut book.writer,
-            toc: &mut book.toc,
-            parent_offset: &mut book.current_offset,
+            book: Some(book),
             id,
             offset,
             length: 0,
@@ -143,10 +140,12 @@ where
 
     /// Complete the chapter.
     ///
+    /// This will return the original BookWriter after updating its TOC.
+    ///
     /// `Chapter` instances should not be dropped; they must be consumed
     /// by calling `close`. This allows us to detect any final IO errors
     /// and update the TOC.
-    pub fn close(mut self) -> Result<()> {
+    pub fn close(mut self) -> Result<BookWriter<W>> {
         self.flush()?;
 
         let toc_entry = TocEntry {
@@ -154,44 +153,54 @@ where
             span: FileSpan::from_offset_length(self.offset, self.length),
         };
 
-        self.toc.add(toc_entry);
-        *self.parent_offset += self.length;
+        // It should never be possible to panic here, because self.book
+        // is set to Some during construction, and it's not possible to
+        // reach the ChapterWriter after close().
+        let mut book = self.book.take().unwrap();
 
-        // Mark this Chapter as safe to drop.
-        self.length = 0;
+        book.toc.add(toc_entry);
+        book.current_offset += self.length;
 
-        Ok(())
+        Ok(book)
     }
 }
 
-impl<W> Drop for ChapterWriter<'_, W> {
+impl<W> Drop for ChapterWriter<W> {
     fn drop(&mut self) {
         // A `Chapter` must not be dropped if it has contents,
         // because we want the owner to call [`close`] and handle
         // any IO errors.
-        if self.length != 0 {
+        if self.book.is_some() {
             // We don't want to panic if the Chapter is being dropped
             // while unwinding.
             if !panicking() {
-                panic!("Chapter was dropped without calling close()");
+                panic!("ChapterWriter was dropped without calling close()");
             }
         }
     }
 }
 
-impl<'a, W> Write for ChapterWriter<'a, W>
+impl<W> Write for ChapterWriter<W>
 where
     W: Write,
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let bytes_written = self.writer.write(buf)?;
+        // It should never be possible to panic here, because self.book
+        // is set to Some during construction, and it's not possible to
+        // reach the ChapterWriter after close().
+        let book = self.book.as_mut().unwrap();
+        let bytes_written = book.writer.write(buf)?;
         self.length += bytes_written;
         Ok(bytes_written)
     }
 
     // Note `close` will call `flush` automatically.
     fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
+        // It should never be possible to panic here, because self.book
+        // is set to Some during construction, and it's not possible to
+        // reach the ChapterWriter after close().
+        let book = self.book.as_mut().unwrap();
+        book.writer.flush()
     }
 }
 
@@ -208,7 +217,7 @@ where
 /// [`new_chapter()`]: Self::new_chapter
 ///
 #[derive(Debug)]
-pub struct BookWriter<W: Write> {
+pub struct BookWriter<W> {
     writer: W,
     current_offset: usize,
     header: FileHeader,
@@ -262,8 +271,8 @@ impl<W: Write> BookWriter<W> {
     /// The chapter `id` can be any value the user wants, and can be
     /// used to later locate a chapter.
     ///
-    pub fn new_chapter(&mut self, id: u64) -> ChapterWriter<'_, W> {
-        ChapterWriter::new(self, id, self.current_offset)
+    pub fn new_chapter(self, id: u64) -> ChapterWriter<W> {
+        ChapterWriter::new(self, id)
     }
 
     /// Finish writing the `Book` file.
@@ -451,15 +460,15 @@ mod tests {
         let magic = 0x1234;
         let buffer = {
             let buffer = Cursor::new(Vec::<u8>::new());
-            let mut book = BookWriter::new(buffer, magic).unwrap();
+            let book = BookWriter::new(buffer, magic).unwrap();
             let chapter = book.new_chapter(11);
-            chapter.close().unwrap();
+            let book = chapter.close().unwrap();
             let mut chapter = book.new_chapter(22);
             chapter.write_all(b"This is chapter 22").unwrap();
-            chapter.close().unwrap();
+            let book = chapter.close().unwrap();
             let mut chapter = book.new_chapter(33);
             chapter.write_all(b"This is chapter 33").unwrap();
-            chapter.close().unwrap();
+            let book = chapter.close().unwrap();
             book.close().unwrap()
         };
         let mut book = Book::new(buffer).unwrap();
