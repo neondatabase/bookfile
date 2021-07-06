@@ -119,6 +119,7 @@ assign_message_ids! {
 pub struct ChapterWriter<'a, W> {
     writer: &'a mut W,
     toc: &'a mut Toc,
+    parent_offset: &'a mut usize,
     id: u64,
     offset: usize,
     length: usize,
@@ -133,6 +134,7 @@ where
         ChapterWriter {
             writer: &mut book.writer,
             toc: &mut book.toc,
+            parent_offset: &mut book.current_offset,
             id,
             offset,
             length: 0,
@@ -153,6 +155,7 @@ where
         };
 
         self.toc.add(toc_entry);
+        *self.parent_offset += self.length;
 
         // Mark this Chapter as safe to drop.
         self.length = 0;
@@ -454,6 +457,9 @@ mod tests {
             let mut chapter = book.new_chapter(22);
             chapter.write_all(b"This is chapter 22").unwrap();
             chapter.close().unwrap();
+            let mut chapter = book.new_chapter(33);
+            chapter.write_all(b"This is chapter 33").unwrap();
+            chapter.close().unwrap();
             book.close().unwrap()
         };
         let mut book = Book::new(buffer).unwrap();
@@ -466,5 +472,9 @@ mod tests {
         let n = book.find_chapter(22).unwrap();
         let ch2 = book.read_chapter(n).unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 22");
+
+        let n = book.find_chapter(33).unwrap();
+        let ch2 = book.read_chapter(n).unwrap();
+        assert_eq!(ch2.as_ref(), b"This is chapter 33");
     }
 }
