@@ -435,7 +435,7 @@ mod tests {
         let magic = 0x1234;
         let mut cursor = Cursor::new(Vec::<u8>::new());
         {
-            let book = BookWriter::new(&mut cursor, magic).unwrap();
+            let _book = BookWriter::new(&mut cursor, magic).unwrap();
             // We drop the BookWriter without calling close().
         }
 
