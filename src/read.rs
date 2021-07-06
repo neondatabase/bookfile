@@ -138,7 +138,8 @@ where
         let max_len = self.length - pos;
         if buf.len() as u64 > max_len {
             // max_len must fit in a usize since it's smaller than buf.len()
-            Ok(&buf[..max_len as usize])
+            let max_len: usize = max_len.try_into().unwrap();
+            Ok(&buf[..max_len])
         } else {
             Ok(buf)
         }
