@@ -1,6 +1,6 @@
 [package]
 name = "bookfile"
-version = "0.2.0"
+version = "0.3.0"
 description = "A container file format with chapters and an index"
 keywords = ["file", "format", "chapters"]
 categories = ["data-structures", "encoding"]
