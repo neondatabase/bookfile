@@ -142,6 +142,18 @@ assign_message_ids! {
 /// identifier, as long as it implements `Into<ChapterId>`.
 pub struct ChapterId(pub Box<[u8]>);
 
+impl From<&[u8]> for ChapterId {
+    fn from(slice: &[u8]) -> Self {
+        Self(slice.into())
+    }
+}
+
+impl From<Box<[u8]>> for ChapterId {
+    fn from(boxed: Box<[u8]>) -> Self {
+        Self(boxed)
+    }
+}
+
 impl From<&str> for ChapterId {
     fn from(s: &str) -> Self {
         String::from(s).into()
