@@ -29,7 +29,7 @@ use thiserror::Error;
 
 mod book;
 #[doc(inline)]
-pub use book::{Book, BookWriter, ChapterIndex, ChapterWriter};
+pub use book::{Book, BookWriter, ChapterId, ChapterIndex, ChapterWriter};
 
 mod read;
 #[doc(inline)]

@@ -2,7 +2,7 @@ use crate::read::BoundedReader;
 use crate::{BookError, Result};
 use aversion::group::{DataSink, DataSourceExt};
 use aversion::util::cbor::CborData;
-use aversion::{assign_message_ids, UpgradeLatest, Versioned};
+use aversion::{assign_message_ids, FromVersion, UpgradeLatest, Versioned};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
@@ -39,7 +39,7 @@ pub type FileHeader = FileHeaderV1;
 /// can be confusing if code attempts to read a zero-sized span. Use
 /// `Option<FileSpan` to represent a zero-sized span.
 ///
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileSpanV1 {
     pub offset: u64,
     pub length: NonZeroU64,
@@ -66,22 +66,51 @@ type FileSpan = FileSpanV1;
 /// This contains an identifying number, and a file span that
 /// tells us what chunk of the file contains this chapter.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TocEntryV1 {
-    pub id: u64,
+struct TocEntryV1 {
+    id: u64,
+    span: Option<FileSpanV1>,
+}
+
+/// A Table-of-contents entry.
+///
+/// This contains an identifying number, and a file span that
+/// tells us what chunk of the file contains this chapter.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct TocEntryV2 {
+    pub id: Box<[u8]>,
     pub span: Option<FileSpanV1>,
 }
 
 // A type alias, to make code a little easier to read.
-type TocEntry = TocEntryV1;
+type TocEntry = TocEntryV2;
+
+/// A Table-of-contents.
+///
+/// This contains multiple `TocEntry` values, one for each chapter.
+#[derive(Debug, Default, Serialize, Deserialize, Versioned)]
+struct TocV1(Vec<TocEntryV1>);
 
 /// A Table-of-contents.
 ///
 /// This contains multiple `TocEntry` values, one for each chapter.
 #[derive(Debug, Default, Serialize, Deserialize, Versioned, UpgradeLatest)]
-pub struct TocV1(Vec<TocEntryV1>);
+pub struct TocV2(Vec<TocEntryV2>);
+
+impl FromVersion<TocV1> for TocV2 {
+    fn from_version(v1: TocV1) -> Self {
+        let entries =
+            v1.0.into_iter()
+                .map(|v1_entry| TocEntryV2 {
+                    id: Box::new(v1_entry.id.to_be_bytes()),
+                    span: v1_entry.span,
+                })
+                .collect();
+        TocV2(entries)
+    }
+}
 
 // A type alias, used by the Versioned trait.
-type Toc = TocV1;
+type Toc = TocV2;
 
 impl Toc {
     fn add(&mut self, entry: TocEntry) {
@@ -102,6 +131,30 @@ assign_message_ids! {
     Toc: 2,
 }
 
+/// A chapter identifier.
+///
+/// This is internally a byte array. Any type may be used as a chapter
+/// identifier, as long as it implements `Into<ChapterId>`.
+pub struct ChapterId(pub Box<[u8]>);
+
+impl From<&str> for ChapterId {
+    fn from(s: &str) -> Self {
+        String::from(s).into()
+    }
+}
+
+impl From<String> for ChapterId {
+    fn from(s: String) -> Self {
+        Self(s.into_bytes().into_boxed_slice())
+    }
+}
+
+impl From<u64> for ChapterId {
+    fn from(n: u64) -> Self {
+        Self(Box::new(n.to_be_bytes()))
+    }
+}
+
 /// A tool for writing a `Chapter`.
 ///
 /// A `ChapterWriter` creates a new chapter. Chapters will be written
@@ -120,7 +173,7 @@ assign_message_ids! {
 /// [`close()`]: Self::close
 pub struct ChapterWriter<W> {
     book: Option<BookWriter<W>>,
-    id: u64,
+    id: Box<[u8]>,
     offset: usize,
     length: usize,
 }
@@ -130,11 +183,15 @@ where
     W: Write,
 {
     /// Create a new `ChapterWriter`.
-    fn new(book: BookWriter<W>, id: u64) -> Self {
+    fn new<Id>(book: BookWriter<W>, id: Id) -> Self
+    where
+        Id: Into<ChapterId>,
+    {
+        let id: ChapterId = id.into();
         let offset = book.current_offset;
         ChapterWriter {
             book: Some(book),
-            id,
+            id: id.0,
             offset,
             length: 0,
         }
@@ -151,7 +208,7 @@ where
         self.flush()?;
 
         let toc_entry = TocEntry {
-            id: self.id,
+            id: self.id.clone(),
             span: FileSpan::from_offset_length(self.offset, self.length),
         };
 
@@ -271,9 +328,13 @@ impl<W: Write> BookWriter<W> {
     /// Create a new `ChapterWriter`.
     ///
     /// The chapter `id` can be any value the user wants, and can be
-    /// used to later locate a chapter.
+    /// used to later locate a chapter. It may be any type that
+    /// implements [`Into<ChapterId>`][ChapterId].
     ///
-    pub fn new_chapter(self, id: u64) -> ChapterWriter<W> {
+    pub fn new_chapter<Id>(self, id: Id) -> ChapterWriter<W>
+    where
+        Id: Into<ChapterId>,
+    {
         ChapterWriter::new(self, id)
     }
 
@@ -421,9 +482,13 @@ where
     ///
     /// For now, we assume chapter ids are unique. That's dumb,
     /// and will be fixed in a future version.
-    pub fn find_chapter(&self, id: u64) -> Option<ChapterIndex> {
+    pub fn find_chapter<Id>(&self, id: Id) -> Option<ChapterIndex>
+    where
+        Id: Into<ChapterId>,
+    {
+        let id: ChapterId = id.into();
         for (index, entry) in self.toc.iter().enumerate() {
-            if entry.id == id {
+            if entry.id == id.0 {
                 return Some(ChapterIndex(index));
             }
         }
@@ -525,7 +590,7 @@ mod tests {
             let mut chapter = book.new_chapter(22);
             chapter.write_all(b"This is chapter 22").unwrap();
             let book = chapter.close().unwrap();
-            let mut chapter = book.new_chapter(33);
+            let mut chapter = book.new_chapter("🦀");
             chapter.write_all(b"This is chapter 33").unwrap();
             let book = chapter.close().unwrap();
             book.close().unwrap()
@@ -541,7 +606,7 @@ mod tests {
         let ch2 = book.exclusive_read_chapter(n).unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 22");
 
-        let n = book.find_chapter(33).unwrap();
+        let n = book.find_chapter("🦀").unwrap();
         let ch2 = book.exclusive_read_chapter(n).unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 33");
     }
@@ -558,7 +623,7 @@ mod tests {
             let mut chapter = book.new_chapter(22);
             chapter.write_all(b"This is chapter 22").unwrap();
             let book = chapter.close().unwrap();
-            let mut chapter = book.new_chapter(33);
+            let mut chapter = book.new_chapter("🦀");
             chapter.write_all(b"This is chapter 33").unwrap();
             let book = chapter.close().unwrap();
             book.close().unwrap()
@@ -574,8 +639,33 @@ mod tests {
         let ch2 = book.read_chapter(n).unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 22");
 
-        let n = book.find_chapter(33).unwrap();
+        let n = book.find_chapter("🦀").unwrap();
         let ch2 = book.read_chapter(n).unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 33");
+    }
+
+    #[test]
+    fn toc_compat() {
+        let mut toc = Vec::new();
+        toc.push(TocEntryV1 {
+            id: 1234,
+            span: Some(FileSpanV1 {
+                length: 33.try_into().unwrap(),
+                offset: 44,
+            }),
+        });
+        let toc = TocV1(toc);
+        let toc = TocV2::from_version(toc);
+        assert_eq!(toc.0.len(), 1);
+        assert_eq!(
+            toc.0[0],
+            TocEntryV2 {
+                id: Box::new(1234u64.to_be_bytes()),
+                span: Some(FileSpanV1 {
+                    length: 33.try_into().unwrap(),
+                    offset: 44,
+                }),
+            }
+        )
     }
 }
