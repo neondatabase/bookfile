@@ -121,8 +121,13 @@ impl Toc {
         self.0.iter()
     }
 
-    fn get_chapter(&self, index: ChapterIndex) -> Result<&TocEntry> {
-        self.0.get(index.0).ok_or(BookError::NoChapter)
+    fn get_chapter<Id>(&self, id: Id) -> Result<&TocEntry>
+    where
+        Id: Into<ChapterId>,
+    {
+        let id: ChapterId = id.into();
+        let entry = self.iter().find(|entry| entry.id == id.0);
+        entry.ok_or(BookError::NoChapter)
     }
 }
 
@@ -364,10 +369,6 @@ impl<W: Write> BookWriter<W> {
     }
 }
 
-/// A chapter index.
-#[derive(Clone, Copy, Debug)]
-pub struct ChapterIndex(pub usize);
-
 /// An interface for reading a Bookfile.
 ///
 #[derive(Debug)]
@@ -401,7 +402,10 @@ impl Book<File> {
     /// [`read_exact_at`]: crate::BoundedReader::read_exact_at
     /// [`exclusive_chapter_reader`]: Self::exclusive_chapter_reader
     ///
-    pub fn chapter_reader(&self, index: ChapterIndex) -> Result<BoundedReader<&File>> {
+    pub fn chapter_reader<Id>(&self, index: Id) -> Result<BoundedReader<&File>>
+    where
+        Id: Into<ChapterId>,
+    {
         let toc_entry = self.toc.get_chapter(index)?;
         match &toc_entry.span {
             None => {
@@ -423,7 +427,10 @@ impl Book<File> {
     /// `read_at`.
     ///
     /// [`chapter_reader`]: Self::chapter_reader
-    pub fn read_chapter(&self, index: ChapterIndex) -> Result<Box<[u8]>> {
+    pub fn read_chapter<Id>(&self, index: Id) -> Result<Box<[u8]>>
+    where
+        Id: Into<ChapterId>,
+    {
         let reader = self.chapter_reader(index)?;
         let chapter_len: usize = reader.len().try_into().unwrap();
         let mut buf = vec![0u8; chapter_len];
@@ -478,21 +485,15 @@ where
         })
     }
 
-    /// Look up a chapter.
+    /// Check whether a chapter exists.
     ///
     /// For now, we assume chapter ids are unique. That's dumb,
     /// and will be fixed in a future version.
-    pub fn find_chapter<Id>(&self, id: Id) -> Option<ChapterIndex>
+    pub fn has_chapter<Id>(&self, id: Id) -> bool
     where
         Id: Into<ChapterId>,
     {
-        let id: ChapterId = id.into();
-        for (index, entry) in self.toc.iter().enumerate() {
-            if entry.id == id.0 {
-                return Some(ChapterIndex(index));
-            }
-        }
-        None
+        self.toc.get_chapter(id).is_ok()
     }
 
     /// Read a chapter, with seeking.
@@ -502,11 +503,11 @@ where
     /// use [`chapter_reader`] instead.
     ///
     /// [`chapter_reader`]: Self::chapter_reader
-    pub fn exclusive_chapter_reader(
-        &mut self,
-        index: ChapterIndex,
-    ) -> Result<BoundedReader<&mut R>> {
-        let toc_entry = self.toc.get_chapter(index)?;
+    pub fn exclusive_chapter_reader<Id>(&mut self, id: Id) -> Result<BoundedReader<&mut R>>
+    where
+        Id: Into<ChapterId>,
+    {
+        let toc_entry = self.toc.get_chapter(id)?;
         match &toc_entry.span {
             None => {
                 // If the span is empty, no IO is necessary; just return
@@ -533,7 +534,10 @@ where
     ///
     /// [`exclusive_chapter_reader`]: Self::exclusive_chapter_reader
     ///
-    pub fn exclusive_read_chapter(&mut self, index: ChapterIndex) -> Result<Box<[u8]>> {
+    pub fn exclusive_read_chapter<Id>(&mut self, index: Id) -> Result<Box<[u8]>>
+    where
+        Id: Into<ChapterId>,
+    {
         let mut buf = vec![];
         let mut reader = self.exclusive_chapter_reader(index)?;
         reader.read_to_end(&mut buf)?;
@@ -596,18 +600,15 @@ mod tests {
             book.close().unwrap()
         };
         let mut book = Book::new(buffer).unwrap();
-        let n = book.find_chapter(11).unwrap();
-        let ch1 = book.exclusive_read_chapter(n).unwrap();
+        let ch1 = book.exclusive_read_chapter(11).unwrap();
         assert!(ch1.is_empty());
 
-        assert!(book.find_chapter(1).is_none());
+        assert!(!book.has_chapter(1));
 
-        let n = book.find_chapter(22).unwrap();
-        let ch2 = book.exclusive_read_chapter(n).unwrap();
+        let ch2 = book.exclusive_read_chapter(22).unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 22");
 
-        let n = book.find_chapter("🦀").unwrap();
-        let ch2 = book.exclusive_read_chapter(n).unwrap();
+        let ch2 = book.exclusive_read_chapter("🦀").unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 33");
     }
 
@@ -629,18 +630,15 @@ mod tests {
             book.close().unwrap()
         };
         let book = Book::new(file).unwrap();
-        let n = book.find_chapter(11).unwrap();
-        let ch1 = book.read_chapter(n).unwrap();
+        let ch1 = book.read_chapter(11).unwrap();
         assert!(ch1.is_empty());
 
-        assert!(book.find_chapter(1).is_none());
+        assert!(!book.has_chapter(1));
 
-        let n = book.find_chapter(22).unwrap();
-        let ch2 = book.read_chapter(n).unwrap();
+        let ch2 = book.read_chapter(22).unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 22");
 
-        let n = book.find_chapter("🦀").unwrap();
-        let ch2 = book.read_chapter(n).unwrap();
+        let ch2 = book.read_chapter("🦀").unwrap();
         assert_eq!(ch2.as_ref(), b"This is chapter 33");
     }
 
