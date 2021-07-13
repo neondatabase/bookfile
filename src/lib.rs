@@ -7,7 +7,7 @@
 //! to create a Bookfile while writing it into a network socket or other
 //! streaming-only device. Any target supporting `std::io::Write` will work.
 //!
-//! Each `Chapter` contains a `[u8]` payload.
+//! Each chapter contains a `[u8]` payload and is read independently.
 //!
 //! The [`Book`] type represents a read-only Bookfile. Invividual chapters can
 //! be read using the `std::io::Read` interface. `Seek` and `read_at` are

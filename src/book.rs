@@ -383,6 +383,18 @@ impl<W: Write> BookWriter<W> {
 
 /// An interface for reading a Bookfile.
 ///
+/// The `Book` type represents a read-only Bookfile. Invividual chapters can
+/// be read in their entirety, or incrementally using the [`Read`] interface.
+/// [`Seek`] and [`read_at`]/[`read_exact_at`]
+/// are also provided, and work within the context of that chapter: the seek
+/// offset is the offset within the chapter, and a read at the end of the
+/// chapter will return EOF.
+///
+/// [`Read`]: std::io::Read
+/// [`Seek`]: std::io::Seek
+/// [`read_at`]: crate::BoundedReader::read_at
+/// [`read_exact_at`]: crate::BoundedReader::read_exact_at
+
 #[derive(Debug)]
 pub struct Book<R> {
     reader: R,
@@ -391,7 +403,7 @@ pub struct Book<R> {
 }
 
 impl<R> Book<R> {
-    /// Return the file's magic number
+    /// Return the file's magic number.
     ///
     /// Each BookWriter specifies a magic number, used to identify this file format.
     /// This method returns the value found in the file.
@@ -436,9 +448,10 @@ impl Book<File> {
     /// Read all bytes in a chapter.
     ///
     /// This is the same thing as calling [`chapter_reader`] followed by
-    /// `read_at`.
+    /// [`read_exact_at`].
     ///
     /// [`chapter_reader`]: Self::chapter_reader
+    /// [`read_exact_at`]: crate::BoundedReader::read_exact_at
     pub fn read_chapter<Id>(&self, index: Id) -> Result<Box<[u8]>>
     where
         Id: Into<ChapterId>,
@@ -455,7 +468,7 @@ impl<R> Book<R>
 where
     R: Read + Seek,
 {
-    /// Create a new Book from a stream
+    /// Create a new Book from a stream.
     ///
     /// This call will attempt to read the file header and table of contents.
     /// It may fail due to IO errors while reading, or invalid file data.
@@ -510,7 +523,8 @@ where
 
     /// Read a chapter, with seeking.
     ///
-    /// This returns a `BoundedReader` that can read and seek within the chapter.
+    /// This returns a `BoundedReader` that can read and seek within the chapter
+    /// (assuming the underlying Book implements `Read + Seek`).
     /// The `Seek` and `Read` traits require exclusive access. For a shared reader,
     /// use [`chapter_reader`] instead.
     ///
@@ -540,11 +554,12 @@ where
     /// Read all bytes in a chapter.
     ///
     /// This is the same thing as calling [`exclusive_chapter_reader`]
-    /// followed by `read_to_end`. It can be used on anything that implements
+    /// followed by [`read_to_end`]. It can be used on anything that implements
     /// `Read + Seek`, but as a result it requires exclusive access via a
     /// mutable reference.
     ///
     /// [`exclusive_chapter_reader`]: Self::exclusive_chapter_reader
+    ///[`read_to_end`]: std::io::Read::read_to_end
     ///
     pub fn exclusive_read_chapter<Id>(&mut self, index: Id) -> Result<Box<[u8]>>
     where
