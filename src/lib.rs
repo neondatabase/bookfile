@@ -32,6 +32,8 @@ mod book;
 pub use book::{Book, BookWriter, ChapterIndex, ChapterWriter};
 
 mod read;
+#[doc(inline)]
+pub use read::BoundedReader;
 
 /// Book error type
 #[derive(Debug, Error)]

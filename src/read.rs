@@ -1,6 +1,7 @@
+use std::borrow::Borrow;
 use std::convert::TryInto;
+use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
-
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::FileExt;
 
@@ -12,20 +13,24 @@ fn to_usize(x: u64) -> usize {
     x.try_into().expect("u64->usize overflow")
 }
 
-/// A wrapper around a `Read`+`Sync` stream that constrains reads to a byte range.
-pub struct BoundedReader<'r, R> {
-    reader: &'r mut R,
+/// An I/O wrapper that constrains reads to a particular byte range.
+///
+/// `BoundedReader` is used to provide read access to a `Book` chapter.
+/// If the `Book` implements `Read + Seek`, then `BoundedReader` will as
+/// well. If the `Book` is a `File`, then `BoundedReader` implements a
+/// [`read_at`] function that permits reading from a shared reference.
+///
+/// [`read_at`]: BoundedReader::read_at
+pub struct BoundedReader<R> {
+    reader: R,
     start: u64,
     length: u64,
     pos: Option<u64>,
 }
 
-impl<'r, R> BoundedReader<'r, R>
-where
-    R: Read + Seek,
-{
-    /// Create a new BoundedReader
-    pub fn new(reader: &'r mut R, start: u64, length: u64) -> Self {
+impl<R> BoundedReader<R> {
+    /// Create a new BoundedReader.
+    pub fn new(reader: R, start: u64, length: u64) -> Self {
         BoundedReader {
             reader,
             start,
@@ -35,7 +40,10 @@ where
     }
 
     /// Create a BoundedReader that returns 0 bytes.
-    pub fn empty(reader: &'r mut R) -> Self {
+    ///
+    /// This can be used to read an empty chapter, or when a reader
+    /// is already at the end of the allowed range.
+    pub(crate) fn empty(reader: R) -> Self {
         BoundedReader {
             reader,
             start: 0,
@@ -44,6 +52,16 @@ where
         }
     }
 
+    /// Return the length of the bounded region.
+    pub fn len(&self) -> u64 {
+        self.length
+    }
+}
+
+impl<R> BoundedReader<R>
+where
+    R: Read + Seek,
+{
     fn initialize_pos(&mut self) -> io::Result<u64> {
         match &self.pos {
             None => {
@@ -62,7 +80,7 @@ where
     }
 }
 
-impl<R> Read for BoundedReader<'_, R>
+impl<R> Read for BoundedReader<R>
 where
     R: Read + Seek,
 {
@@ -90,7 +108,7 @@ where
     }
 }
 
-impl<R> Seek for BoundedReader<'_, R>
+impl<R> Seek for BoundedReader<R>
 where
     R: Seek,
 {
@@ -128,7 +146,7 @@ where
 }
 
 // If the underlying Read stream implements BufRead, then we should too.
-impl<R> BufRead for BoundedReader<'_, R>
+impl<R> BufRead for BoundedReader<R>
 where
     R: BufRead + Seek,
 {
@@ -162,28 +180,85 @@ where
 // This is a half implementation of the FileExt trait, but since that trait
 // is os-specific, and we don't support `write_at`, supplying a function with
 // the same name seems like an acceptable compromise.
+//
+// The generic bounds R: Borrow<File> lets this work for BoundedReader<File>
+// and BoundedReader<&File>. It would be nice if we could say R: Borrow<F: FileExt>
+// but that seems quite hard to implement.
+
 #[cfg(target_family = "unix")]
-impl<R> BoundedReader<'_, R>
+impl<R> BoundedReader<R>
 where
-    R: FileExt,
+    R: Borrow<File>,
 {
-    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    /// Compute the maximum read length is for a given offset.
+    fn cap_length(&self, len: usize, offset: u64) -> usize {
         let bound_end = self.start.checked_add(self.length).unwrap();
         if offset > bound_end {
             // Trying to read past the end of the bounded region.
-            return Ok(0);
+            return 0;
         }
-        let requested_end = self.start + offset + buf.len() as u64;
+        let requested_end = self.start + offset + len as u64;
         let end_reduction = requested_end.saturating_sub(bound_end);
         // Will always succeed, since end_reduction can never be larger than buf.len()
         let end_reduction: usize = end_reduction.try_into().unwrap();
-        let capped_len: usize = buf.len().checked_sub(end_reduction).unwrap();
+        let capped_len: usize = len.checked_sub(end_reduction).unwrap();
+        capped_len
+    }
+
+    /// Read some bytes from a fixed offset.
+    ///
+    /// `read_at` permits reading from a shared reference, which isn't possible
+    /// when using the `Read` trait.
+    ///
+    /// Note: `read_at` may not return without reading the number of bytes
+    /// expected. [`read_exact_at`] may be preferred for this reason.
+    ///
+    /// [`read_exact_at`]: Self::read_exact_at
+    ///
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        let capped_len = self.cap_length(buf.len(), offset);
+        if capped_len == 0 {
+            return Ok(0);
+        }
         let capped_buf = &mut buf[..capped_len];
 
         // Will always succeed, since we already checked that the offset
         // fits within the bounded range.
         let adjusted_offset = self.start.checked_add(offset).unwrap();
-        self.reader.read_at(capped_buf, adjusted_offset)
+        let f: &File = self.reader.borrow();
+        f.read_at(capped_buf, adjusted_offset)
+    }
+
+    /// Read an exact number of bytes from a fixed offset.
+    ///
+    /// Like `read_at`, this permits reading from a shared reference, which isn't possible
+    /// when using the `Read` trait.
+    ///
+    /// This function will only return `Ok` if it successfully read sufficient bytes
+    /// to fill the buffer.  See the [`FileExt`] trait for more details.
+    ///
+    /// [`FileExt`]: std::os::unix::fs::FileExt
+    ///
+    pub fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        let capped_len = self.cap_length(buf.len(), offset);
+
+        // If we would cap the length, that means it's not possible to
+        // satisfy the user's expectation that read_exact_at always fills
+        // the buffer.
+        if capped_len != buf.len() {
+            // This is the ErrorKind that would be returned by File when
+            // trying to read past the end.
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "BoundedReader read_exact_at exceeded bound",
+            ));
+        }
+
+        // Will always succeed, since we already checked that the offset
+        // fits within the bounded range.
+        let adjusted_offset = self.start.checked_add(offset).unwrap();
+        let f: &File = self.reader.borrow();
+        f.read_exact_at(buf, adjusted_offset)
     }
 }
 
@@ -261,7 +336,7 @@ mod tests {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(&buf).unwrap();
 
-        let reader = BoundedReader::new(&mut file, 5, 5);
+        let reader = BoundedReader::new(file, 5, 5);
 
         // A read entirely contained within the bounded range.
         let mut read_buf = [0u8; 3];

@@ -5,6 +5,8 @@ use aversion::util::cbor::CborData;
 use aversion::{assign_message_ids, UpgradeLatest, Versioned};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
+use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::thread::panicking;
@@ -324,6 +326,51 @@ impl<R> Book<R> {
     }
 }
 
+#[cfg(target_family = "unix")]
+impl Book<File> {
+    /// Create a shared reader object.
+    ///
+    /// This returns a BoundedReader that does not implement `Seek` or `Read`, only
+    /// [`read_at`] and [`read_exact_at`]
+    /// This means it can be used via a shared reference.
+    ///
+    /// If the `Seek` and `Read` traits are required, use [`exclusive_chapter_reader`] instead.
+    ///
+    /// [`read_at`]: crate::BoundedReader::read_at
+    /// [`read_exact_at`]: crate::BoundedReader::read_exact_at
+    /// [`exclusive_chapter_reader`]: Self::exclusive_chapter_reader
+    ///
+    pub fn chapter_reader(&self, index: ChapterIndex) -> Result<BoundedReader<&File>> {
+        let toc_entry = self.toc.get_chapter(index)?;
+        match &toc_entry.span {
+            None => {
+                // If the span is empty, no IO is necessary; just return
+                // an empty Vec.
+                Ok(BoundedReader::empty(&self.reader))
+            }
+            Some(span) => Ok(BoundedReader::new(
+                &self.reader,
+                span.offset,
+                span.length.into(),
+            )),
+        }
+    }
+
+    /// Read all bytes in a chapter.
+    ///
+    /// This is the same thing as calling [`chapter_reader`] followed by
+    /// `read_at`.
+    ///
+    /// [`chapter_reader`]: Self::chapter_reader
+    pub fn read_chapter(&self, index: ChapterIndex) -> Result<Box<[u8]>> {
+        let reader = self.chapter_reader(index)?;
+        let chapter_len: usize = reader.len().try_into().unwrap();
+        let mut buf = vec![0u8; chapter_len];
+        reader.read_exact_at(&mut buf, 0)?;
+        Ok(buf.into_boxed_slice())
+    }
+}
+
 impl<R> Book<R>
 where
     R: Read + Seek,
@@ -383,8 +430,17 @@ where
         None
     }
 
-    /// Read a chapter by index.
-    pub fn chapter_reader(&mut self, index: ChapterIndex) -> Result<BoundedReader<R>> {
+    /// Read a chapter, with seeking.
+    ///
+    /// This returns a `BoundedReader` that can read and seek within the chapter.
+    /// The `Seek` and `Read` traits require exclusive access. For a shared reader,
+    /// use [`chapter_reader`] instead.
+    ///
+    /// [`chapter_reader`]: Self::chapter_reader
+    pub fn exclusive_chapter_reader(
+        &mut self,
+        index: ChapterIndex,
+    ) -> Result<BoundedReader<&mut R>> {
         let toc_entry = self.toc.get_chapter(index)?;
         match &toc_entry.span {
             None => {
@@ -405,13 +461,16 @@ where
 
     /// Read all bytes in a chapter.
     ///
-    /// This is the same thing as calling [`chapter_reader`] followed by
-    /// `read_to_end`.
+    /// This is the same thing as calling [`exclusive_chapter_reader`]
+    /// followed by `read_to_end`. It can be used on anything that implements
+    /// `Read + Seek`, but as a result it requires exclusive access via a
+    /// mutable reference.
     ///
-    /// [`chapter_reader`]: Self::chapter_reader
-    pub fn read_chapter(&mut self, index: ChapterIndex) -> Result<Box<[u8]>> {
+    /// [`exclusive_chapter_reader`]: Self::exclusive_chapter_reader
+    ///
+    pub fn exclusive_read_chapter(&mut self, index: ChapterIndex) -> Result<Box<[u8]>> {
         let mut buf = vec![];
-        let mut reader = self.chapter_reader(index)?;
+        let mut reader = self.exclusive_chapter_reader(index)?;
         reader.read_to_end(&mut buf)?;
         Ok(buf.into_boxed_slice())
     }
@@ -472,6 +531,39 @@ mod tests {
             book.close().unwrap()
         };
         let mut book = Book::new(buffer).unwrap();
+        let n = book.find_chapter(11).unwrap();
+        let ch1 = book.exclusive_read_chapter(n).unwrap();
+        assert!(ch1.is_empty());
+
+        assert!(book.find_chapter(1).is_none());
+
+        let n = book.find_chapter(22).unwrap();
+        let ch2 = book.exclusive_read_chapter(n).unwrap();
+        assert_eq!(ch2.as_ref(), b"This is chapter 22");
+
+        let n = book.find_chapter(33).unwrap();
+        let ch2 = book.exclusive_read_chapter(n).unwrap();
+        assert_eq!(ch2.as_ref(), b"This is chapter 33");
+    }
+
+    #[test]
+    fn book_file_shared() {
+        let temp = tempfile::tempfile().unwrap();
+
+        let magic = 0x1234;
+        let file = {
+            let book = BookWriter::new(temp, magic).unwrap();
+            let chapter = book.new_chapter(11);
+            let book = chapter.close().unwrap();
+            let mut chapter = book.new_chapter(22);
+            chapter.write_all(b"This is chapter 22").unwrap();
+            let book = chapter.close().unwrap();
+            let mut chapter = book.new_chapter(33);
+            chapter.write_all(b"This is chapter 33").unwrap();
+            let book = chapter.close().unwrap();
+            book.close().unwrap()
+        };
+        let book = Book::new(file).unwrap();
         let n = book.find_chapter(11).unwrap();
         let ch1 = book.read_chapter(n).unwrap();
         assert!(ch1.is_empty());
