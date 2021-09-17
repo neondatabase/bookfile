@@ -1,9 +1,11 @@
 use crate::read::BoundedReader;
+use crate::writer::ChecksummedWriter;
 use crate::{BookError, Result};
 use aversion::group::{DataSink, DataSourceExt};
 use aversion::util::cbor::CborData;
 use aversion::{assign_message_ids, FromVersion, UpgradeLatest, Versioned};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use crc32c::{crc32c, crc32c_append};
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fs::File;
@@ -30,8 +32,25 @@ pub struct FileHeaderV1 {
     pub user_magic: u32,
 }
 
+#[derive(Debug, Versioned, UpgradeLatest, Serialize, Deserialize)]
+pub struct FileHeaderV2 {
+    bookwriter_magic: u32,
+    pub user_magic: u32,
+    has_checksum: bool,
+}
+
+impl FromVersion<FileHeaderV1> for FileHeaderV2 {
+    fn from_version(v1: FileHeaderV1) -> Self {
+        Self {
+            bookwriter_magic: v1.bookwriter_magic,
+            user_magic: v1.user_magic,
+            has_checksum: false, // V1 doesn't support checksums
+        }
+    }
+}
+
 /// A type alias; this will always point to the latest version `FileHeader`.
-pub type FileHeader = FileHeaderV1;
+pub type FileHeader = FileHeaderV2;
 
 /// A `FileSpan` stores the byte offset and length of some range of a file.
 ///
@@ -205,7 +224,7 @@ where
         Id: Into<ChapterId>,
     {
         let id: ChapterId = id.into();
-        let offset = book.current_offset;
+        let offset = book.writer.get_offset();
         ChapterWriter {
             book: Some(book),
             id: id.0,
@@ -235,7 +254,6 @@ where
         let mut book = self.book.take().unwrap();
 
         book.toc.add(toc_entry);
-        book.current_offset += self.length;
 
         Ok(book)
     }
@@ -294,13 +312,12 @@ where
 ///
 #[derive(Debug)]
 pub struct BookWriter<W> {
-    writer: W,
-    current_offset: usize,
+    writer: ChecksummedWriter<W>,
     header: FileHeader,
     toc: Toc,
 }
 
-impl<W: Write> BookWriter<W> {
+impl<W: Write + Seek> BookWriter<W> {
     /// Create a new `BookWriter`.
     ///
     /// `user_magic` is a number stored in the file for later identification.
@@ -309,11 +326,11 @@ impl<W: Write> BookWriter<W> {
     ///
     pub fn new(writer: W, user_magic: u32) -> Result<Self> {
         let mut this = BookWriter {
-            writer,
-            current_offset: 0,
+            writer: ChecksummedWriter::new(writer),
             header: FileHeader {
                 bookwriter_magic: BOOK_V1_MAGIC,
                 user_magic,
+                has_checksum: true,
             },
             toc: Toc::default(),
         };
@@ -335,10 +352,13 @@ impl<W: Write> BookWriter<W> {
         // size.
         header_buf.resize(HEADER_SIZE, 0);
 
-        // FIXME: wrap the writer in some struct that automatically counts
-        // the number of bytes written.
         self.writer.write_all(&header_buf)?;
-        self.current_offset = HEADER_SIZE;
+
+        // Write a zero checksum
+        if self.header.has_checksum {
+            self.writer.write_u32::<BigEndian>(0)?;
+        }
+
         Ok(())
     }
 
@@ -374,10 +394,14 @@ impl<W: Write> BookWriter<W> {
         // Write the TOC.
         self.writer.write_all(&toc_buf)?;
 
-        // TODO: Add a checksum.
+        // Write the checksum
+        let checksum = self.writer.get_checksum();
+        let mut writer = self.writer.close();
+        writer.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+        writer.write_u32::<BigEndian>(checksum)?;
 
-        self.writer.flush()?;
-        Ok(self.writer)
+        writer.flush()?;
+        Ok(writer)
     }
 }
 
@@ -464,18 +488,69 @@ impl Book<File> {
     }
 }
 
+/// Verify the checksum in a file matches the checksum computed from its
+/// contents.
+///
+/// Assumes reader is seeked to [`HEADER_SIZE`].
+fn verify_checksum(header: &[u8], reader: &mut impl Read) -> Result<()> {
+    let expected_checksum = reader.read_u32::<BigEndian>()?;
+
+    let mut actual_checksum = crc32c(header);
+    actual_checksum = crc32c_append(actual_checksum, &u32::to_be_bytes(0));
+
+    // TODO what is the optimal size for this buffer
+    let mut buf = vec![0u8; 16 * 1024 * 1024];
+    loop {
+        let bytes_read = reader.read(&mut buf)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        actual_checksum = crc32c_append(actual_checksum, &buf[..bytes_read]);
+    }
+
+    if expected_checksum != actual_checksum {
+        Err(BookError::Checksum)
+    } else {
+        Ok(())
+    }
+}
+
+/// Option for checksum verification when opening a [`Book`].
+#[derive(PartialEq, Eq)]
+pub enum ChecksumVerification {
+    /// Verify the checksum
+    Verify,
+    /// Do not verify the checksum
+    DoNotVerify,
+}
+
 impl<R> Book<R>
 where
     R: Read + Seek,
 {
     /// Create a new Book from a stream.
     ///
-    /// This call will attempt to read the file header and table of contents.
+    /// This call will load the file header and table of contents into memory.
+    /// It will also scan the entire file to verify integrity.
     /// It may fail due to IO errors while reading, or invalid file data.
     ///
     /// The stream must impl the `Read` and `Seek` traits (e.g. a `File`).
     ///
-    pub fn new(mut reader: R) -> Result<Self> {
+    pub fn new(reader: R) -> Result<Self> {
+        Self::with_checksum_option(reader, ChecksumVerification::Verify)
+    }
+
+    /// Create a new Book from a stream.
+    ///
+    /// This call will load the file header and table of contents into memory.
+    /// If checksum verification is enabled via the [`checksum`] argument,
+    /// the file will be scanned to verify integrity.
+    /// It may fail due to IO errors while reading, or invalid file data.
+    ///
+    /// The stream must impl the `Read` and `Seek` traits (e.g. a `File`).
+    ///
+    pub fn with_checksum_option(mut reader: R, checksum: ChecksumVerification) -> Result<Self> {
         // Read the header from the beginning of the file.
         let mut header_buf = [0u8; HEADER_SIZE];
         reader.seek(SeekFrom::Start(0))?;
@@ -488,6 +563,18 @@ where
         // Verify magic numbers
         if header.bookwriter_magic != BOOK_V1_MAGIC {
             return Err(BookError::Serializer);
+        }
+
+        if checksum == ChecksumVerification::Verify {
+            // Reject files that don't have a checksum.
+            // They either came from an old bookfile writer or the `has_checksum`
+            // header data was corrupted.
+            if !header.has_checksum {
+                return Err(BookError::Checksum);
+            }
+
+            // Verify the checksum bytes
+            verify_checksum(&header_buf, &mut reader)?;
         }
 
         // Read the TOC length. For v1 it is the last 8 bytes of the file.
@@ -576,7 +663,7 @@ where
 mod tests {
 
     use super::*;
-    use std::io::Cursor;
+    use std::{io::Cursor, ops::Neg};
 
     #[test]
     fn empty_book() {
@@ -587,8 +674,8 @@ mod tests {
             book.close().unwrap();
         }
 
-        // This file contains only a header, an empty TOC, and a TOC-length.
-        assert_eq!(cursor.get_ref().len(), 4096 + 9 + 8);
+        // This file contains only a header, a checksum, an empty TOC, and a TOC-length.
+        assert_eq!(cursor.get_ref().len(), 4096 + 4 + 9 + 8);
 
         // If this succeeds then the header and TOC were parsed correctly.
         let _ = Book::new(cursor).unwrap();
@@ -603,11 +690,82 @@ mod tests {
             // We drop the BookWriter without calling close().
         }
 
-        // This file contains only a header (yes, this is invalid).
-        assert_eq!(cursor.get_ref().len(), 4096);
+        // This file contains only a header and checksum (yes, this is invalid).
+        assert_eq!(cursor.get_ref().len(), 4096 + 4);
 
         // This should fail, because we are unable to parse the chapter index.
         Book::new(cursor).unwrap_err();
+    }
+
+    #[test]
+    fn checksum() {
+        fn test_corrupt(index_to_corrupt: i64, harmful: Option<bool>) {
+            let magic = 0x1234;
+            let mut cursor = Cursor::new(Vec::<u8>::new());
+            {
+                let book = BookWriter::new(&mut cursor, magic).unwrap();
+
+                let mut chapter = book.new_chapter(1);
+                chapter.write_all(b"test").unwrap();
+                let book = chapter.close().unwrap();
+
+                book.close().unwrap();
+            }
+
+            // Corrupt a bit
+            let mut contents = cursor.into_inner();
+
+            let mut toc_len_bytes = [0u8; 8];
+            toc_len_bytes.copy_from_slice(&contents[contents.len() - 8..]);
+
+            let idx = if index_to_corrupt.is_negative() {
+                contents.len() - index_to_corrupt.neg() as usize
+            } else {
+                index_to_corrupt as usize
+            };
+            contents[idx] ^= 1;
+
+            let cursor = Cursor::new(contents);
+
+            // This should fail, because the checksums don't match.
+            Book::new(cursor.clone()).unwrap_err();
+
+            let unverified_res =
+                Book::with_checksum_option(cursor, ChecksumVerification::DoNotVerify);
+
+            match harmful {
+                Some(true) => {
+                    unverified_res.unwrap_err();
+                }
+                Some(false) => {
+                    unverified_res.unwrap();
+                }
+                None => {}
+            }
+        }
+
+        const HEADER_SIZE: i64 = super::HEADER_SIZE as i64;
+
+        // Corrupt the header
+        test_corrupt(0, Some(true));
+        test_corrupt(HEADER_SIZE - 1, Some(false));
+
+        // Corrupt the checksum
+        test_corrupt(HEADER_SIZE, Some(false));
+        const CHECKSUM_SIZE: i64 = 4;
+        test_corrupt(HEADER_SIZE + CHECKSUM_SIZE - 1, Some(false));
+
+        // Corrupt the data
+        test_corrupt(HEADER_SIZE + CHECKSUM_SIZE, Some(false));
+        test_corrupt(HEADER_SIZE + CHECKSUM_SIZE + 1, Some(false));
+
+        // Corrupt the TOC length
+        test_corrupt(-1, Some(true));
+        test_corrupt(-8, Some(true));
+
+        // Corrupt the TOC
+        test_corrupt(-8 - 48, None);
+        test_corrupt(-8 - 1, None);
     }
 
     #[test]

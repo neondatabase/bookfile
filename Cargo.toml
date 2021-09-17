@@ -15,6 +15,7 @@ aversion = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 byteorder = "1.4"
 thiserror = "1.0"
+crc32c = "0.6.0"
 
 [dev-dependencies]
 tempfile = "3.2"
