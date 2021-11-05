@@ -1,6 +1,4 @@
-use std::borrow::Borrow;
 use std::convert::TryInto;
-use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::FileExt;
@@ -180,15 +178,11 @@ where
 // This is a half implementation of the FileExt trait, but since that trait
 // is os-specific, and we don't support `write_at`, supplying a function with
 // the same name seems like an acceptable compromise.
-//
-// The generic bounds R: Borrow<File> lets this work for BoundedReader<File>
-// and BoundedReader<&File>. It would be nice if we could say R: Borrow<F: FileExt>
-// but that seems quite hard to implement.
 
 #[cfg(target_family = "unix")]
-impl<R> BoundedReader<R>
+impl<R> BoundedReader<&R>
 where
-    R: Borrow<File>,
+    R: FileExt,
 {
     /// Compute the maximum read length is for a given offset.
     fn cap_length(&self, len: usize, offset: u64) -> usize {
@@ -225,8 +219,7 @@ where
         // Will always succeed, since we already checked that the offset
         // fits within the bounded range.
         let adjusted_offset = self.start.checked_add(offset).unwrap();
-        let f: &File = self.reader.borrow();
-        f.read_at(capped_buf, adjusted_offset)
+        self.reader.read_at(capped_buf, adjusted_offset)
     }
 
     /// Read an exact number of bytes from a fixed offset.
@@ -257,8 +250,7 @@ where
         // Will always succeed, since we already checked that the offset
         // fits within the bounded range.
         let adjusted_offset = self.start.checked_add(offset).unwrap();
-        let f: &File = self.reader.borrow();
-        f.read_exact_at(buf, adjusted_offset)
+        self.reader.read_exact_at(buf, adjusted_offset)
     }
 }
 

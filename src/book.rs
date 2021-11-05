@@ -6,7 +6,6 @@ use aversion::{assign_message_ids, FromVersion, UpgradeLatest, Versioned};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
-use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::thread::panicking;
@@ -413,7 +412,10 @@ impl<R> Book<R> {
 }
 
 #[cfg(target_family = "unix")]
-impl Book<File> {
+impl<R> Book<R>
+where
+    R: std::os::unix::fs::FileExt,
+{
     /// Create a shared reader object.
     ///
     /// This returns a BoundedReader that does not implement `Seek` or `Read`, only
@@ -426,7 +428,7 @@ impl Book<File> {
     /// [`read_exact_at`]: crate::BoundedReader::read_exact_at
     /// [`exclusive_chapter_reader`]: Self::exclusive_chapter_reader
     ///
-    pub fn chapter_reader<Id>(&self, index: Id) -> Result<BoundedReader<&File>>
+    pub fn chapter_reader<Id>(&self, index: Id) -> Result<BoundedReader<&R>>
     where
         Id: Into<ChapterId>,
     {
