@@ -328,7 +328,7 @@ mod tests {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(&buf).unwrap();
 
-        let reader = BoundedReader::new(file, 5, 5);
+        let reader = BoundedReader::new(&file, 5, 5);
 
         // A read entirely contained within the bounded range.
         let mut read_buf = [0u8; 3];
