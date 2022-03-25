@@ -21,4 +21,6 @@ A chapter's offset, length, and id number are all kept in a *Table of Contents*
 stored at the end of the file. The TOC will be read when a Book is opened,
 but no chapters will be read until requested.
 
+A crc32c checksum is used to ensure file integrity.
+
 License: Apache-2.0

@@ -18,6 +18,8 @@
 //! A chapter's offset, length, and id number are all kept in a *Table of Contents*
 //! stored at the end of the file. The TOC will be read when a Book is opened,
 //! but no chapters will be read until requested.
+//!
+//! A crc32c checksum is used to ensure file integrity.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
@@ -29,11 +31,13 @@ use thiserror::Error;
 
 mod book;
 #[doc(inline)]
-pub use book::{Book, BookWriter, ChapterId, ChapterWriter};
+pub use book::{Book, BookWriter, ChapterId, ChapterWriter, ChecksumVerification};
 
 mod read;
 #[doc(inline)]
 pub use read::BoundedReader;
+
+mod writer;
 
 /// Book error type
 #[derive(Debug, Error)]
@@ -50,6 +54,9 @@ pub enum BookError {
     /// The requested chapter was not found.
     #[error("Chapter not found")]
     NoChapter,
+    /// The computed checksum did not match the stored checksum
+    #[error("Checksum verification error")]
+    Checksum,
 }
 
 impl From<CborDataError> for BookError {
